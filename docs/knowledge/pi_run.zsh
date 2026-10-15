@@ -1,0 +1,101 @@
+typeset -g _PI_DIR="${${(%):-%x}:A:h}"
+
+local workdir="${1:A}"
+local entrypoint="$2"
+shift 2
+local user="$(id -un)"
+local user_home="/home/$user"
+local uid="$(id -u)"
+local gid="$(id -g)"
+local flutter_home="$HOME/.local/share/flutter"
+local cargo_home="$HOME/.cargo"
+local rustup_home="$HOME/.rustup"
+local cargo_incremental="1"
+local image="pi-sandbox"
+local containerfile="$_PI_DIR/Containerfile"
+local -a build_args=(--build-arg "USER_NAME=$user")
+local m
+local -a run_envs=(
+	"HOME=$user_home"
+	"CARGO_HOME=$cargo_home"
+	"RUSTUP_HOME=$rustup_home"
+	"FLUTTER_HOME=$flutter_home"
+	"CARGO_INCREMENTAL=$cargo_incremental"
+	"PATH=$flutter_home/bin:$cargo_home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+)
+local -a env_args
+for m in "${run_envs[@]}"; do
+	env_args+=(--env "$m")
+done
+local -a display_args
+case $OSTYPE in
+linux*)
+	if [[ -n $XDG_RUNTIME_DIR && -n $WAYLAND_DISPLAY ]]; then
+		local wayland_socket="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+		if [[ -S $wayland_socket ]]; then
+			env_args+=(--env "XDG_RUNTIME_DIR=/tmp" --env "WAYLAND_DISPLAY=$WAYLAND_DISPLAY")
+			display_args+=(-v "$wayland_socket:/tmp/$WAYLAND_DISPLAY")
+			run_envs+=("XDG_RUNTIME_DIR=/tmp" "WAYLAND_DISPLAY=$WAYLAND_DISPLAY")
+		fi
+	fi
+	;;
+darwin*)
+	;;
+esac
+local hash_command=sha256sum
+command -v "$hash_command" >/dev/null || hash_command=shasum
+local new_hash="$({
+	"$hash_command" "$containerfile"
+	printf '%s\n' "${build_args[@]}" "${run_envs[@]}"
+} | "$hash_command" | awk '{print $1}')"
+local old_hash="$(
+	podman inspect "$image" \
+		--format '{{index .Config.Labels "pi-hash"}}' \
+		2>/dev/null
+)"
+
+if [[ $new_hash != "$old_hash" ]]; then
+	printf 'pi: building %s\n' "$image"
+	podman build \
+		"${build_args[@]}" \
+		--label "pi-hash=$new_hash" \
+		-f "$containerfile" \
+		-t "$image" \
+		"$_PI_DIR" || return 1
+fi
+
+local -a home_mounts=(
+	"$cargo_home"
+	"$rustup_home"
+	"$flutter_home"
+	"$HOME/.gitconfig"
+)
+local pi_volume="pi-agent"
+# podman volume create "$pi_volume" >/dev/null || return 1
+local skills_dir="$HOME/.pi/agent/skills"
+mkdir -p "$skills_dir" || return 1
+local -a vol_args=(
+	-v "$pi_volume:$user_home/.pi:U"
+	-v "$skills_dir:$user_home/.pi/agent/skills:ro"
+)
+for m in "${home_mounts[@]}"; do
+	[[ -e $m ]] || continue
+	vol_args+=(-v "$m:$user_home/${m#"$HOME/"}")
+done
+
+printf 'pi: %s in %s\n' "$entrypoint" "$workdir"
+
+podman run --rm -it \
+	--userns keep-id \
+	--user "$uid:$gid" \
+	--init \
+	--pull never \
+	--add-host host.docker.internal:host-gateway \
+	--entrypoint "$entrypoint" \
+	--workdir "$workdir" \
+	"${env_args[@]}" \
+	"${vol_args[@]}" \
+	"${display_args[@]}" \
+	-v "$workdir:$workdir" \
+	"$image" \
+	"$@"

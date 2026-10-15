@@ -1,0 +1,32 @@
+FROM node:26-trixie-slim
+
+RUN : \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    git \
+    curl \
+    build-essential \
+    clang \
+    mold \
+    pkg-config \
+    sudo \
+    ripgrep \
+    jq \
+    vim \
+    wl-clipboard \
+    xclip \
+  && apt-get clean \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+
+ARG USER_NAME
+RUN : \
+  && userdel node \
+  && useradd -l -G sudo --shell /bin/bash --create-home "$USER_NAME" \
+  && printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$USER_NAME" \
+	> "/etc/sudoers.d/$USER_NAME"
+
+USER $USER_NAME
